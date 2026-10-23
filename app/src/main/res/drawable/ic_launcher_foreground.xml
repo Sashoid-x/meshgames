@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Схематичная "игральная" фигура: перекрестие на поле -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- клетчатое поле 4x4 -->
+    <path android:fillColor="#1B263B" android:pathData="M30,30h24v24h-24z M54,54h24v24h-24z" />
+    <path android:fillColor="#415A77" android:pathData="M54,30h24v24h-24z M30,54h24v24h-24z" />
+    <!-- крест -->
+    <path android:fillColor="#E0E1DD"
+        android:pathData="M49,36h10v13h13v10h-13v13h-10v-13h-13v-10h13z" />
+</vector>
