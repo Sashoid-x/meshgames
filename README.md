@@ -119,7 +119,7 @@ cd bot_server
 ## 📻 Как играть по радиоканалу
 
 1. **На обоих телефонах:**
-   - Установить форк **Meshtastic-Android** с поддержкой «Mesh Bridge» и **MeshGames**.
+   - Установить форк **[Meshtastic-Android-ADV](https://github.com/Sashoid-x/Meshtastic-Android/releases)** с поддержкой «Mesh Bridge» и **MeshGames**.
    - В форке Meshtastic: *Settings* → *Radio Config* → *Mesh Bridge* — включить переключатель и настроить portnum (по умолчанию `69`).
 2. **В приложении MeshGames:**
    - Открыть приложение → экран «Подключение» → нажать «📱 Радиосеть (мост)».
