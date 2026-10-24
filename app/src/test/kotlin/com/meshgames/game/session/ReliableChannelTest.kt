@@ -95,6 +95,27 @@ class ReliableChannelTest {
     }
 
     @Test
+    fun terminalFramesDoNotEnterEternalMode() {
+        val a = channel()
+        val now = 0L
+        a.send(MsgType.GAME_OVER, SID, byteArrayOf(1), now)
+        assertEquals(1, a.pendingCount())
+
+        val gaps = ReliableChannel.PATIENT_RETRY_GAPS_MS
+        var t = now
+        for ((i, g) in gaps.withIndex()) {
+            t += g
+            val frames = a.tick(t)
+            assertEquals("гэп #$i", 1, frames.size)
+        }
+
+        // Попытки базового расписания исчерпаны:
+        // Терминальный кадр GAME_OVER должен быть удалён из unacked, а не переходить в вечный режим!
+        assertEquals(0, a.pendingCount())
+        assertTrue(a.tick(t + ReliableChannel.ETERNAL_GAP_MS).isEmpty())
+    }
+
+    @Test
     fun controlFrameBypassesSeqHoleAndIsDeduplicated() {
         val a = channel()
         val b = channel()

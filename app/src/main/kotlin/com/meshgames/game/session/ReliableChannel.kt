@@ -316,7 +316,9 @@ class ReliableChannel(val sessionId: Int) {
      */
     fun tick(nowMs: Long): List<Outgoing> {
         val out = ArrayList<Outgoing>(2)
-        for (p in unacked.values) {
+        val it = unacked.values.iterator()
+        while (it.hasNext()) {
+            val p = it.next()
             val gaps = gapsFor(p.envelope.type)
             // Piggyback-triggered silence: если пир присылал кадр ПОСЛЕ отправки нашего кадра,
             // даём ему дополнительное время на ответ перед первым повтором.
@@ -332,9 +334,16 @@ class ReliableChannel(val sessionId: Int) {
                 out.add(Outgoing(p.envelope.copy(cumAck = ack.cumAck, bitmap = ack.bitmap).encode()))
                 p.retriesDone++
                 if (p.retriesDone >= gaps.size) {
-                    // Базовое расписание исчерпано, подтверждения нет —
-                    // вечный режим: редкий повтор, ровно один за этот тик.
-                    p.nextDueMs = nowMs + ETERNAL_GAP_MS
+                    if (isTerminalType(p.envelope.type)) {
+                        // Терминальный кадр (GAME_OVER, SESSION_DELETE, INVITE_CANCEL):
+                        // попытки базового расписания исчерпаны — удаляем из очереди,
+                        // чтобы не мусорить в эфир вечными повторами.
+                        it.remove()
+                    } else {
+                        // Базовое расписание исчерпано, подтверждения нет —
+                        // вечный режим: редкий повтор, ровно один за этот тик.
+                        p.nextDueMs = nowMs + ETERNAL_GAP_MS
+                    }
                     break
                 }
                 p.nextDueMs += gaps[p.retriesDone]
@@ -381,9 +390,10 @@ class ReliableChannel(val sessionId: Int) {
      * Возвращает null, если подтверждать нечего (ACK_NONE) или для этого cumAck
      * ACK_ONLY уже отправлялся.
      */
-    fun makeAckOnly(): ByteArray? {
+    fun makeAckOnly(force: Boolean = false): ByteArray? {
         val ack = ackSnapshot()
-        if (ack.cumAck == ACK_NONE || ack.cumAck == lastAckOnlyCumAck) return null
+        if (ack.cumAck == ACK_NONE) return null
+        if (!force && ack.cumAck == lastAckOnlyCumAck) return null
         lastAckOnlyCumAck = ack.cumAck
         return Envelope(
             type = MsgType.ACK_ONLY,
@@ -428,6 +438,10 @@ class ReliableChannel(val sessionId: Int) {
             val type = MsgType.fromId(f.type) ?: continue
             val gaps = gapsFor(type)
             if (f.attempts >= gaps.size) {
+                if (isTerminalType(type)) {
+                    // Терминальные кадры с исчерпанным базовым расписанием не воскрешаем в вечном режиме
+                    continue
+                }
                 // Базовое расписание кончилось ещё до рестарта — кадр живёт
                 // вечно до подтверждения, первый вечный повтор через гэп.
                 unacked[f.seq and 0xFFFF] = Pending(
@@ -505,6 +519,19 @@ class ReliableChannel(val sessionId: Int) {
             -> PATIENT_RETRY_GAPS_MS
 
             else -> RETRY_GAPS_MS
+        }
+
+        /**
+         * Терминальные кадры, завершающие сессию или приглашение.
+         * Не должны крутиться в вечном режиме после исчерпания базового расписания.
+         */
+        fun isTerminalType(type: MsgType): Boolean = when (type) {
+            MsgType.GAME_OVER,
+            MsgType.SESSION_DELETE,
+            MsgType.INVITE_CANCEL,
+            -> true
+
+            else -> false
         }
 
         /** a precedes b in u16 wrap-around serial arithmetic. */

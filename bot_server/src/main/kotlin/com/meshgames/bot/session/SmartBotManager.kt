@@ -249,6 +249,7 @@ class SmartBotManager(
      * Проверяем все активные сессии: если где-то наступил наш ход или висит спор — отвечаем.
      */
     private fun checkAllActiveSessions() {
+        val nowMs = System.currentTimeMillis()
         for (view in sessionManager.sessions_.value) {
             val s = view.session
             if (s.closed) continue
@@ -269,6 +270,17 @@ class SmartBotManager(
                         sessionManager.submitVerdict(s.sessionId, true)
                     } else {
                         planMoveIfNeeded(s.sessionId)
+                    }
+                }
+                SessionStatus.FINISHED, SessionStatus.DECLINED, SessionStatus.CANCELLED -> {
+                    val ageMs = nowMs - s.updatedAtMs
+                    val unackedCount = s.unacked.size
+                    // Сессия завершена: если все кадры подтверждены (спустя 15 с)
+                    // или прошло более 3 минут (все 6 попыток базового расписания исчерпаны) —
+                    // удаляем сессию, чтобы бот не держал её в памяти и не занимал ресурсы.
+                    if ((unackedCount == 0 && ageMs > 15_000L) || ageMs > 180_000L) {
+                        BotLogger.ai("sid=${s.sessionId}: авто-очистка завершённой партии (status=${s.status}, unacked=$unackedCount, прошло ${ageMs / 1000}с)")
+                        sessionManager.dismiss(s.sessionId)
                     }
                 }
                 else -> Unit

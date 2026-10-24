@@ -157,6 +157,10 @@ class SessionManager(
 
     private val repeats = ArrayList<Repeat>()
 
+    /** Cooldown отправки SESSION_DELETE для неизвестных сессий (антифлуд). */
+    private val unknownSessionDeleteCooldown = HashMap<Int, Long>()
+    private val UNKNOWN_SESSION_DELETE_COOLDOWN_MS = 30_000L
+
     private val _views = MutableStateFlow<List<SessionView>>(emptyList())
     val sessions_: StateFlow<List<SessionView>> = _views.asStateFlow()
 
@@ -405,6 +409,7 @@ class SessionManager(
     fun deleteSession(sessionId: Int) {
         val rt = sessions[sessionId] ?: return
         DebugLog.d("S", "удаление сессии sid=$sessionId (локально сразу + повторы)")
+        repeats.removeAll { Envelope.decode(it.frame)?.sessionId == sessionId }
         fireAndRepeat(
             rt.session.peerNode,
             Envelope(MsgType.SESSION_DELETE, sessionId, 0, ByteArray(0)).encode(),
@@ -611,6 +616,21 @@ class SessionManager(
             // Новая сессия возможна только через INVITE.
             if (env.type != MsgType.INVITE) {
                 DebugLog.d("RX", "→ нет сессии sid=${env.sessionId}, пропуск")
+                // Если соперник шлёт кадры для уже удалённой/несуществующей у нас сессии (например,
+                // повторы GAME_OVER после того, как мы нажали «Закрыть» или удалили партию),
+                // отправляем SESSION_DELETE, чтобы пир не мусорил в эфир вечными повторами.
+                if (env.type != MsgType.SESSION_DELETE && env.type != MsgType.ACK_ONLY) {
+                    val nowMs = now()
+                    val lastSent = unknownSessionDeleteCooldown[env.sessionId] ?: 0L
+                    if (nowMs - lastSent > UNKNOWN_SESSION_DELETE_COOLDOWN_MS) {
+                        unknownSessionDeleteCooldown[env.sessionId] = nowMs
+                        if (unknownSessionDeleteCooldown.size > 50) {
+                            unknownSessionDeleteCooldown.entries.removeIf { nowMs - it.value > UNKNOWN_SESSION_DELETE_COOLDOWN_MS * 2 }
+                        }
+                        DebugLog.d("S", "отправляем SESSION_DELETE для отсутствующей sid=${env.sessionId} узлу $from")
+                        transport.sendAsync(from, Envelope(MsgType.SESSION_DELETE, env.sessionId, 0, ByteArray(0)).encode())
+                    }
+                }
                 return
             }
             val invite = InvitePayload.decode(env.payload) ?: run {
@@ -641,6 +661,7 @@ class SessionManager(
         if (env.type == MsgType.ACK_ONLY) {
             DebugLog.d("RX", "ACK_ONLY sid=${env.sessionId} от $from (cumAck=${env.cumAck})")
             rt.channel.receive(payload, now())
+            refresh()
             return
         }
 
@@ -653,6 +674,7 @@ class SessionManager(
             sessions.remove(env.sessionId)
             // Данные сессии на диске — вместе с журналом ходов.
             journals.delete(env.sessionId)
+            repeats.removeAll { Envelope.decode(it.frame)?.sessionId == env.sessionId }
             events.onSessionDeletedByPeer(env.sessionId, rt.session.gameId, from)
             refresh()
             return
@@ -687,6 +709,10 @@ class SessionManager(
         val result = rt.channel.receive(payload, now())
         if (result.deliveries.isEmpty()) {
             DebugLog.d("RX", "→ дубликат/стэш seq=${env.seq} (rxNext=${rt.channel.rxNextSeq()})")
+            if (env.type == MsgType.GAME_OVER) {
+                DebugLog.d("S", "дубликат GAME_OVER sid=${env.sessionId} — повторно шлём ACK_ONLY")
+                sendAckOnly(rt)
+            }
         }
         sendFrames(rt, result.toSend)
         for (env2 in result.deliveries) dispatch(rt, env2)
@@ -784,10 +810,10 @@ class SessionManager(
                 val over = GameOverPayload.decode(env.payload) ?: return
                 // Кадр уже завершённой сессии (повторы GAME_OVER после
                 // рестарта) — обрабатывать нечего: иначе два аппарата
-                // крутят GAME_OVER вечно. Принятый кадр подтверждается
-                // piggyback'ом на любом нашем ответном кадре.
+                // крутят GAME_OVER вечно. Гасим повторы кадра отправкой ACK_ONLY.
                 if (rt.session.status == SessionStatus.FINISHED) {
-                    DebugLog.d("S", "GAME_OVER для уже завершённой sid=${rt.session.sessionId} — пропуск")
+                    DebugLog.d("S", "GAME_OVER для уже завершённой sid=${rt.session.sessionId} — пропуск, гасим повтор ACK_ONLY")
+                    sendAckOnly(rt)
                     return
                 }
                 val winner = when (over.winner) {
@@ -798,6 +824,7 @@ class SessionManager(
                 val reason = ResultReason.entries.getOrElse(over.reason) { ResultReason.OPPONENT_LEFT }
                 DebugLog.d("S", "итог от соперника sid=${rt.session.sessionId}: победитель=$winner причина=$reason")
                 finish(rt, GameResult(winner, reason), sendOver = false)
+                sendAckOnly(rt)
             }
             MsgType.DRAW_OFFER -> {
                 val s = rt.session
@@ -1238,6 +1265,15 @@ class SessionManager(
         val env = Envelope(type, rt.session.sessionId, 0, payload)
         DebugLog.d("TX", "$type (ненадёжный) sid=${rt.session.sessionId} → узел ${rt.session.peerNode}")
         transport.sendAsync(rt.session.peerNode, env.encode())
+    }
+
+    /**
+     * Отправить легковесный ACK_ONLY (12 байт, seq=0) для быстрого гашения повторов пира.
+     */
+    private fun sendAckOnly(rt: Runtime) {
+        val ackFrame = rt.channel.makeAckOnly(force = true) ?: return
+        DebugLog.d("TX", "ACK_ONLY sid=${rt.session.sessionId} (cumAck=${(rt.channel.rxNextSeq() - 1) and 0xFFFF})")
+        transport.sendAsync(rt.session.peerNode, ackFrame)
     }
 
     private fun sendFrames(rt: Runtime, frames: List<ReliableChannel.Outgoing>) {

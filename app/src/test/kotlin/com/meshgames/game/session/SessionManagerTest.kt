@@ -984,4 +984,53 @@ class SessionManagerTest {
         assertFalse(net.managerA.reroll(sid)) // перестановка блокирована
         assertFalse(net.managerA.ready(sid)) // повторный «Готово» не шлём
     }
+
+    @Test
+    fun gameOverIsAcknowledgedWithAckOnlyAndClearsUnacked() {
+        val net = startedPair(GameType.TIC_TAC_TOE)
+        val sid = net.managerA.sessions_.value.first().session.sessionId
+        val sideA = net.managerA.session(sid)!!.mySide
+
+        // Победа 3 в ряд
+        val moves = if (sideA == Side.A) {
+            listOf(0, 3, 1, 4, 2)
+        } else {
+            listOf(3, 0, 4, 1, 6, 2)
+        }
+        for (m in moves) {
+            val mover = if (net.managerA.snapshot(sid)!!.turn == net.managerA.session(sid)!!.mySide) {
+                net.managerA
+            } else {
+                net.managerB
+            }
+            assertTrue(mover.submitMove(sid, MoveInput.Cell(m)))
+            net.pump()
+        }
+
+        // Партия завершена на обеих сторонах
+        assertEquals(SessionStatus.FINISHED, net.managerA.session(sid)!!.status)
+        assertEquals(SessionStatus.FINISHED, net.managerB.session(sid)!!.status)
+
+        // Инициатор GAME_OVER получил ACK_ONLY, поэтому unacked пуст!
+        assertTrue("unacked у A должен быть пуст", net.managerA.session(sid)!!.unacked.isEmpty())
+        assertTrue("unacked у B должен быть пуст", net.managerB.session(sid)!!.unacked.isEmpty())
+    }
+
+    @Test
+    fun frameForUnknownSessionRepliesSessionDelete() {
+        val net = PairNetwork()
+        net.start()
+        val sid = 12345
+        // B не имеет сессии sid=12345. A шлёт кадр GAME_OVER для этой сессии в B
+        val gameOverEnv = Envelope(MsgType.GAME_OVER, sid, 1, byteArrayOf(0, 0))
+        net.managerB.handleIncoming(net.nodeA, gameOverEnv.encode())
+
+        // B должен отправить SESSION_DELETE узлу A
+        val sentByB = net.sentLog.filter { it.first == net.nodeA && it.second == net.nodeB }
+        assertTrue("B должен был отправить пакет узлу A", sentByB.isNotEmpty())
+        val decoded = Envelope.decode(sentByB.last().third)
+        assertNotNull(decoded)
+        assertEquals(MsgType.SESSION_DELETE, decoded!!.type)
+        assertEquals(sid, decoded.sessionId)
+    }
 }
